@@ -1,0 +1,74 @@
+import requests
+import pandas as pd
+from datetime import datetime
+
+# === Step 1: Get user-defined start date ===
+start_date = input("Enter start date (yyyy-mm-dd): ").strip()
+end_date = datetime.today().strftime('%Y-%m-%d')  # today's date
+
+from urllib.parse import quote
+
+# === Step 2: API Setup ===
+base_api_url = "https://api.prod.legislation.gov.au/v1/titles/search"
+
+criteria_raw = f"and(registrationdate({start_date},{end_date}),collection(Act))"
+criteria_encoded = quote(criteria_raw)  # <-- Encode the criteria safely
+
+params = {
+    "criteria": criteria_encoded,
+    "$select": "name,id",
+    "$expand": "searchContexts($expand=fullTextVersion)",
+    "$orderby": "searchcontexts/fulltextversion/registeredat desc",
+    "$count": "true",
+    "$top": "100",
+    "$skip": "0"
+}
+
+
+# === Step 3: Send API Request ===
+response = requests.get(base_api_url, params=params)
+
+if response.status_code != 200:
+    print("Failed to fetch data:", response.status_code)
+    print(response.text)  # Show what the server actually returned
+    exit()
+
+try:
+    data = response.json()
+except Exception as e:
+    print("Failed to decode JSON response.")
+    print("Raw response text:", response.text)
+    raise
+
+
+# === Step 4: Parse JSON Response ===
+base_site_url = "https://www.legislation.gov.au/Details/"
+results = []
+
+for item in data.get('value', []):
+    title = item.get('name', 'N/A')
+    act_id = item.get('id', '')
+    
+    # Get registered date
+    registered_date = (
+        item.get('searchContexts', [{}])[0]
+            .get('fullTextVersion', {})
+            .get('registeredAt', '')
+    )
+    registered_date = registered_date[:10] if registered_date else 'N/A'
+    
+    # Construct the clickable URL to the Act
+    article_url = f"{base_site_url}{act_id}" if act_id else 'N/A'
+
+    results.append({
+        "Registered Date": registered_date,
+        "Title": title,
+        "URL": article_url
+    })
+
+# === Step 5: Save to DataFrame and CSV ===
+df = pd.DataFrame(results)
+df.to_csv("acts_filtered_results.csv", index=False)
+
+print("\n DataFrame created and saved to 'acts_filtered_results.csv'")
+print(df.head())
