@@ -1,0 +1,95 @@
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+import pandas as pd
+import time
+
+# === Step 1: Take user input ===
+start_date_str = input("Enter start date (yyyy-mm-dd): ").strip()
+
+try:
+    start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+except ValueError:
+    print("❌ Invalid format. Use yyyy-mm-dd (e.g., 2025-06-01).")
+    exit()
+
+today = datetime.today()
+delta_days = (today - start_date).days
+
+if delta_days < 0:
+    print("❌ Start date cannot be in the future.")
+    exit()
+
+# === Step 2: Construct the URL ===
+url = f"https://www.legislation.gov.au/search/registrationdate(today-{delta_days},today)/collection(act)/sort(registeredat%20desc)"
+print(f"\n🔍 Fetching data from:\n{url}\n")
+
+# === Step 3: Make request and parse HTML ===
+headers = {
+    "User-Agent": "Mozilla/5.0"
+}
+response = requests.get(url, headers=headers)
+
+if response.status_code != 200:
+    print("❌ Failed to fetch the page. Status:", response.status_code)
+    exit()
+
+soup = BeautifulSoup(response.text, "html.parser")
+
+# === Step 4: Extract articles ===
+results = []
+
+for item in soup.select("frl-grid-cell-title-name-in-force .title-name a"):
+    title = item.text.strip()
+    relative_link = item.get("href", "").strip()
+    base_url = "https://www.legislation.gov.au"
+    full_url = base_url + relative_link if relative_link else "N/A"
+
+    # Registered date
+    reg_info = item.find_parent().find_next_sibling("div")
+    reg_date = "N/A"
+    if reg_info and "Registered:" in reg_info.text:
+        text = reg_info.get_text(strip=True)
+        if "Registered:" in text:
+            reg_date = text.split("Registered:")[-1].strip()
+
+    # === Step 4.1: Go inside article page and get effective date ===
+    effective_date = "N/A"
+    download_link = "N/A"
+    act_id = relative_link.split("/")[1] if relative_link else None
+
+    if full_url != "N/A":
+        act_text_url = full_url.replace("/latest/text", "/latest/text")
+        detail_response = requests.get(act_text_url, headers=headers)
+        if detail_response.status_code == 200:
+            detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+            eff_span = detail_soup.select_one("span.date-effective-start")
+            if eff_span:
+                effective_date = eff_span.text.strip()
+
+                # Convert to yyyy-mm-dd for URL
+                try:
+                    eff_dt_obj = datetime.strptime(effective_date, "%d %B %Y")
+                    eff_dt_str = eff_dt_obj.strftime("%Y-%m-%d")
+                    # Construct download link
+                    download_link = f"{base_url}/{act_id}/{eff_dt_str}/{eff_dt_str}/text/original/pdf"
+                    download_link = f'=HYPERLINK("{download_link}", "Download")'  # for Excel
+                except Exception:
+                    pass
+
+        time.sleep(0.5)  # polite delay
+
+    results.append({
+        "Title": title,
+        "Registered Date": reg_date,
+        "Effective Date": effective_date,
+        "URL": full_url,
+        "Download": download_link
+    })
+
+# === Step 5: Save to DataFrame and CSV ===
+df = pd.DataFrame(results)
+df.to_csv("acts_scraped.csv", index=False)
+
+print("✅ Done! Saved to 'acts_scraped.csv'")
+print(df.head())
