@@ -1,0 +1,180 @@
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+import pandas as pd
+import time
+import io
+import PyPDF2
+# Alternative: import pdfplumber
+
+def extract_pdf_content(pdf_url, headers):
+    """
+    Download PDF from URL and extract text content
+    """
+    try:
+        # Download PDF content
+        pdf_response = requests.get(pdf_url, headers=headers, timeout=30)
+        if pdf_response.status_code != 200:
+            return "❌ Failed to download PDF"
+
+        # Create a file-like object from the PDF content
+        pdf_file = io.BytesIO(pdf_response.content)
+
+        # Extract text using PyPDF2
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        text_content = ""
+
+        for page_num in range(len(pdf_reader.pages)):
+            page = pdf_reader.pages[page_num]
+            text_content += page.extract_text() + "\n"
+
+        # Clean up the text (remove excessive whitespace)
+        text_content = " ".join(text_content.split())
+
+        return text_content if text_content.strip() else "❌ No text extracted"
+
+    except Exception as e:
+        return f"❌ Error extracting PDF: {str(e)}"
+
+# Alternative function using pdfplumber (often better for complex PDFs)
+def extract_pdf_content_pdfplumber(pdf_url, headers):
+    """
+    Download PDF from URL and extract text content using pdfplumber
+    """
+    try:
+        import pdfplumber
+
+        # Download PDF content
+        pdf_response = requests.get(pdf_url, headers=headers, timeout=30)
+        if pdf_response.status_code != 200:
+            return "❌ Failed to download PDF"
+
+        # Create a file-like object from the PDF content
+        pdf_file = io.BytesIO(pdf_response.content)
+
+        # Extract text using pdfplumber
+        text_content = ""
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text_content += page_text + "\n"
+
+        # Clean up the text
+        text_content = " ".join(text_content.split())
+
+        return text_content if text_content.strip() else "❌ No text extracted"
+
+    except ImportError:
+        return "❌ pdfplumber not installed. Use: pip install pdfplumber"
+    except Exception as e:
+        return f"❌ Error extracting PDF: {str(e)}"
+
+# === Step 1: Take user input ===
+start_date_str = input("Enter start date (yyyy-mm-dd): ").strip()
+try:
+    start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+except ValueError:
+    print("❌ Invalid format. Use yyyy-mm-dd (e.g., 2025-06-01).")
+    exit()
+
+today = datetime.today()
+delta_days = (today - start_date).days
+
+if delta_days < 0:
+    print("❌ Start date cannot be in the future.")
+    exit()
+
+# === Step 2: Construct the URL ===
+url = f"https://www.legislation.gov.au/search/registrationdate(today-{delta_days},today)/collection(act)/sort(registeredat%20desc)"
+print(f"\n🔍 Fetching data from:\n{url}\n")
+
+# === Step 3: Make request and parse HTML ===
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
+
+response = requests.get(url, headers=headers)
+if response.status_code != 200:
+    print("❌ Failed to fetch the page. Status:", response.status_code)
+    exit()
+
+soup = BeautifulSoup(response.text, "html.parser")
+
+# === Step 4: Extract articles ===
+results = []
+total_items = len(soup.select("frl-grid-cell-title-name-in-force .title-name a"))
+print(f"Found {total_items} items to process...\n")
+
+for idx, item in enumerate(soup.select("frl-grid-cell-title-name-in-force .title-name a"), 1):
+    print(f"Processing item {idx}/{total_items}...")
+
+    title = item.text.strip()
+    relative_link = item.get("href", "").strip()
+    base_url = "https://www.legislation.gov.au"
+    full_url = base_url + relative_link if relative_link else "N/A"
+
+    # Registered date
+    reg_info = item.find_parent().find_next_sibling("div")
+    reg_date = "N/A"
+    if reg_info and "Registered:" in reg_info.text:
+        text = reg_info.get_text(strip=True)
+        if "Registered:" in text:
+            reg_date = text.split("Registered:")[-1].strip()
+
+    # === Step 4.1: Go inside article page and get effective date ===
+    effective_date = "N/A"
+    download_link = "N/A"
+    content = "N/A"
+    act_id = relative_link.split("/")[1] if relative_link else None
+
+    if full_url != "N/A":
+        act_text_url = full_url.replace("/latest/text", "/latest/text")
+        detail_response = requests.get(act_text_url, headers=headers)
+
+        if detail_response.status_code == 200:
+            detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+            eff_span = detail_soup.select_one("span.date-effective-start")
+
+            if eff_span:
+                effective_date = eff_span.text.strip()
+
+                # Convert to yyyy-mm-dd for URL
+                try:
+                    eff_dt_obj = datetime.strptime(effective_date, "%d %B %Y")
+                    eff_dt_str = eff_dt_obj.strftime("%Y-%m-%d")
+
+                    # Construct download link
+                    pdf_url = f"{base_url}/{act_id}/{eff_dt_str}/{eff_dt_str}/text/original/pdf"
+                    download_link = f'=HYPERLINK("{pdf_url}", "Download")' # for Excel
+
+                    # === NEW: Extract PDF content ===
+                    print(f"  Extracting PDF content from: {pdf_url}")
+                    content = extract_pdf_content(pdf_url, headers)
+
+                    # Limit content length for CSV (optional)
+                    if len(content) > 10000:  # Limit to first 10k characters
+                        content = content[:10000] + "... [TRUNCATED]"
+
+                except Exception as e:
+                    print(f"  ❌ Error processing dates: {e}")
+                    pass
+
+        time.sleep(1)  # Increased delay to be more polite when downloading PDFs
+
+    results.append({
+        "Title": title,
+        "Registered Date": reg_date,
+        "Effective Date": effective_date,
+        "URL": full_url,
+        "Download": download_link,
+        "Content": content
+    })
+
+# === Step 5: Save to DataFrame and CSV ===
+df = pd.DataFrame(results)
+df.to_csv("acts_scraped_with_content.csv", index=False)
+print("\n✅ Done! Saved to 'acts_scraped_with_content.csv'")
+print(f"\nProcessed {len(results)} items")
+print("\nSample of extracted data:")
+print(df[['Title', 'Registered Date', 'Content']].head())
