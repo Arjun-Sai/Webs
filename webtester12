@@ -1,0 +1,149 @@
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+import pandas as pd
+import time
+import io
+import PyPDF2
+
+def extract_pdf_content(pdf_url, headers):
+    try:
+        pdf_response = requests.get(pdf_url, headers=headers, timeout=30)
+        if pdf_response.status_code != 200:
+            return None
+        pdf_file = io.BytesIO(pdf_response.content)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        text_content = []
+        for page in pdf_reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text_content.append(page_text)
+        return " ".join(" ".join(text_content).split())
+    except Exception:
+        return None
+
+def extract_content_with_fallback(base_pdf_url, headers):
+    print(f"Trying base PDF first...")
+    base_content = extract_pdf_content(base_pdf_url, headers)
+
+    if base_content:
+        print(f"Base PDF extracted successfully.")
+        return base_content
+
+    print(f"Base failed. Trying multivolume PDFs...")
+    content_parts = []
+    volume = 1
+
+    while True:
+        volume_url = f"{base_pdf_url}/{volume}"
+        try:
+            response = requests.get(volume_url, headers=headers, timeout=15, stream=True)
+            print("h2")
+            print(volume_url)
+            if response.status_code != 200:
+                print("h1")
+                print(response.status_code)
+                print(f"Volume {volume} not found, stopping.")
+                break
+            response.close()
+
+            print(f"Found Volume {volume}, extracting...")
+            vol_text = extract_pdf_content(volume_url, headers)
+            if vol_text:
+                content_parts.append(f"=== VOLUME {volume} ===\n\n{vol_text}")
+                print(f"Volume {volume} added.")
+            else:
+                print(f"Volume {volume} extraction failed.")
+        except requests.exceptions.RequestException as e:
+            print(f"Error with Volume {volume}: {e}")
+            break
+
+        volume += 1
+        time.sleep(0.5)
+
+    if content_parts:
+        return "\n\n" + ("\n\n" + "="*60 + "\n\n").join(content_parts)
+    else:
+        return "No content extracted"
+
+def main(days: int):
+    # === Step 1: Construct URL from user-given number of days ===
+    url = f"https://www.legislation.gov.au/search/registrationdate(today-{days},today)/collection(act)/sort(registeredat%20desc)"
+    print(f"\n🔍 Searching:\n{url}\n")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        print("Failed to fetch page.")
+        return
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    results = []
+    items = soup.select("frl-grid-cell-title-name-in-force .title-name a")
+    print(f"Found {len(items)} acts.\n")
+
+    for idx, item in enumerate(items, 1):
+        print(f"Processing {idx}/{len(items)}")
+        title = item.text.strip()
+        relative_link = item.get("href", "").strip()
+        base_url = "https://www.legislation.gov.au"
+        full_url = base_url + relative_link if relative_link else "N/A"
+
+        reg_info = item.find_parent().find_next_sibling("div")
+        reg_date = "N/A"
+        if reg_info and "Registered:" in reg_info.text:
+            reg_date = reg_info.get_text(strip=True).split("Registered:")[-1].strip()
+
+        effective_date = "N/A"
+        content = "N/A"
+        download_link = "N/A"
+
+        act_id = relative_link.split("/")[1] if relative_link else None
+        if full_url != "N/A":
+            detail_response = requests.get(full_url, headers=headers)
+            if detail_response.status_code == 200:
+                detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                eff_span = detail_soup.select_one("span.date-effective-start")
+                if eff_span:
+                    effective_date = eff_span.text.strip()
+                    try:
+                        eff_dt_obj = datetime.strptime(effective_date, "%d %B %Y")
+                        eff_dt_str = eff_dt_obj.strftime("%Y-%m-%d")
+                        pdf_url = f"{base_url}/{act_id}/{eff_dt_str}/{eff_dt_str}/text/original/pdf"
+                        download_link = pdf_url
+                        print(f"Attempting content extraction from {pdf_url}")
+                        content = extract_content_with_fallback(pdf_url, headers)
+
+                        if len(content) > 10000:
+                            content = content[:10000] + "... [TRUNCATED]"
+                    except Exception as e:
+                        print(f"Date parsing failed: {e}")
+            time.sleep(1)
+
+        results.append({
+            "Title": title,
+            "Registered Date": reg_date,
+            "URL": full_url,
+            "Content": content
+        })
+
+    pd.set_option("display.max_colwidth", None)
+    df = pd.DataFrame(results)
+    df.to_excel("acts_scraped_with_multivolumes.xlsx", index=False)
+    print("\nDone. Data saved to 'acts_scraped_with_multivolumes.xlsx'")
+    print(df[["Title", "Registered Date", "URL", "Content"]].head())
+
+# === Call the function with a value of days ===
+if __name__ == "__main__":
+    user_input = input("Enter number of days to look back from today: ").strip()
+    try:
+        days = int(user_input)
+        if days <= 0:
+            raise ValueError
+        main(days)
+    except ValueError:
+        print("Please enter a valid positive integer for days.")
