@@ -1,0 +1,59 @@
+import requests
+import io
+import PyPDF2
+import time
+
+def extract_pdf_text(url, headers):
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code != 200:
+            print(f"❌ Failed to download Volume at {url}")
+            return None
+
+        pdf_file = io.BytesIO(response.content)
+        reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        return text.strip()
+    except Exception as e:
+        print(f"❌ Error reading PDF from {url}: {e}")
+        return None
+
+# --- Setup ---
+base_pdf_url = "https://www.legislation.gov.au/C1901A00006/2025-04-21/2025-04-21/text/original/pdf"
+headers = {
+    "User-Agent": "Mozilla/5.0"
+}
+volume = 1
+all_text_parts = []
+
+while True:
+    volume_url = f"{base_pdf_url}/{volume}"
+    print(f"📥 Downloading Volume {volume}...")
+
+    # Check if URL is valid (optional)
+    head_check = requests.head(volume_url, headers=headers)
+    if head_check.status_code != 200:
+        print(f"❌ Volume {volume} not found (status {head_check.status_code}), stopping.")
+        break
+
+    text = extract_pdf_text(volume_url, headers)
+    if text:
+        all_text_parts.append(f"\n\n=== VOLUME {volume} ===\n\n{text}")
+        print(f"✅ Volume {volume} extracted.")
+    else:
+        print(f"⚠️ Volume {volume} failed to extract.")
+    volume += 1
+    time.sleep(0.5)
+
+# --- Save to file ---
+if all_text_parts:
+    full_text = "\n\n" + "="*60 + "\n\n".join(all_text_parts)
+    with open("multi_volume_combined.txt", "w", encoding="utf-8") as f:
+        f.write(full_text)
+    print("\n✅ Combined content saved to 'multi_volume_combined.txt'")
+else:
+    print("❌ No volumes extracted.")
